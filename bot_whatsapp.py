@@ -22,10 +22,10 @@ import signal as signal_module
 
 # ==================== CONFIGURACIÓN ====================
 class Config:
-    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "tu-api-key-aqui")
+    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")
     
     # Números de teléfono
-    YOUR_PHONE = "+02995359660"  # Tu número personal (formato internacional)
+    YOUR_PHONE = "+"  # Tu número personal (formato internacional)
     
     # Signal CLI path (ajustar según instalación)
     SIGNAL_CLI_PATH = "signal-cli"
