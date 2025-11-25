@@ -1,6 +1,6 @@
 """
 Bot de WhatsApp con Control desde Signal
-Requiere: pip install anthropic schedule pytz pydub SpeechRecognition pysignalcli
+Requiere: pip install anthropic schedule pytz pydub SpeechRecognition selenium webdriver-manager
 """
 
 import os
@@ -11,7 +11,13 @@ import re
 from datetime import datetime
 from typing import List, Dict, Tuple
 import anthropic
-from whatsapp_web import WhatsAppWeb
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
 import imaplib
 import email
 from email.header import decode_header
@@ -19,7 +25,6 @@ import speech_recognition as sr
 from pydub import AudioSegment
 import subprocess
 import signal as signal_module
-
 load_dotenv()
 
 # ==================== CONFIGURACIÓN ====================
@@ -83,7 +88,173 @@ class Config:
         # Si tiene contactos, SOLO responde a estos
     ]
 
-# ==================== CLIENTE DE SIGNAL ====================
+# ==================== CLIENTE DE WHATSAPP ====================
+class WhatsAppClient:
+    """Cliente de WhatsApp usando Selenium"""
+    
+    def __init__(self):
+        self.driver = None
+        self.is_connected = False
+        
+    def connect(self):
+        """Conecta a WhatsApp Web"""
+        try:
+            print("🌐 Iniciando navegador Chrome...")
+            
+            # Configurar Chrome
+            chrome_options = Options()
+            chrome_options.add_argument('--user-data-dir=./whatsapp_session')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--no-sandbox')
+            # chrome_options.add_argument('--headless')  # Descomenta para modo sin interfaz
+            
+            # Iniciar driver
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            
+            # Abrir WhatsApp Web
+            self.driver.get('https://web.whatsapp.com')
+            
+            print("📱 WhatsApp Web abierto")
+            print("⏳ Esperando QR o sesión guardada...")
+            
+            # Esperar a que cargue (QR o sesión guardada)
+            WebDriverWait(self.driver, 60).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, '[data-testid="chat-list"]'))
+            )
+            
+            self.is_connected = True
+            print("✅ WhatsApp Web conectado")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error conectando a WhatsApp: {e}")
+            return False
+    
+    def send_message(self, phone_or_name: str, message: str):
+        """Envía mensaje por WhatsApp"""
+        if not self.is_connected:
+            return False
+        
+        try:
+            # Buscar contacto
+            search_box = self.driver.find_element(By.CSS_SELECTOR, '[data-testid="chat-list-search"]')
+            search_box.click()
+            search_box.send_keys(phone_or_name)
+            time.sleep(1)
+            
+            # Seleccionar primer resultado
+            first_result = self.driver.find_element(By.CSS_SELECTOR, '[data-testid="cell-frame-container"]')
+            first_result.click()
+            time.sleep(0.5)
+            
+            # Escribir mensaje
+            message_box = self.driver.find_element(By.CSS_SELECTOR, '[data-testid="conversation-compose-box-input"]')
+            message_box.send_keys(message)
+            time.sleep(0.3)
+            
+            # Enviar
+            send_button = self.driver.find_element(By.CSS_SELECTOR, '[data-testid="send"]')
+            send_button.click()
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error enviando mensaje: {e}")
+            return False
+    
+    def get_unread_messages(self) -> List[Dict]:
+        """Obtiene mensajes no leídos"""
+        if not self.is_connected:
+            return []
+        
+        messages = []
+        
+        try:
+            # Buscar chats con mensajes no leídos
+            unread_chats = self.driver.find_elements(By.CSS_SELECTOR, '[data-testid="cell-frame-container"] span[aria-label*="mensaje"]')
+            
+            for chat in unread_chats[:5]:  # Procesar máximo 5 chats
+                try:
+                    chat.click()
+                    time.sleep(1)
+                    
+                    # Obtener nombre del chat
+                    chat_name = self.driver.find_element(By.CSS_SELECTOR, '[data-testid="conversation-header"] span[dir="auto"]').text
+                    
+                    # Verificar si es grupo
+                    is_group = False
+                    try:
+                        self.driver.find_element(By.CSS_SELECTOR, '[data-testid="default-group"]')
+                        is_group = True
+                    except:
+                        pass
+                    
+                    # Verificar si está silenciado
+                    is_muted = False
+                    try:
+                        self.driver.find_element(By.CSS_SELECTOR, '[data-testid="muted"]')
+                        is_muted = True
+                    except:
+                        pass
+                    
+                    # Obtener mensajes no leídos del chat
+                    message_elements = self.driver.find_elements(By.CSS_SELECTOR, '[data-testid="msg-container"]')
+                    
+                    for msg_elem in message_elements[-3:]:  # Últimos 3 mensajes
+                        try:
+                            text = msg_elem.find_element(By.CSS_SELECTOR, 'span.selectable-text').text
+                            
+                            messages.append({
+                                'id': f"{chat_name}_{int(time.time())}",
+                                'sender': chat_name,
+                                'sender_name': chat_name,
+                                'text': text,
+                                'type': 'text',
+                                'is_group': is_group,
+                                'is_muted': is_muted,
+                                'chat_name': chat_name
+                            })
+                        except:
+                            continue
+                    
+                except Exception as e:
+                    print(f"Error procesando chat: {e}")
+                    continue
+            
+            return messages
+            
+        except Exception as e:
+            print(f"❌ Error obteniendo mensajes: {e}")
+            return []
+    
+    def monitor_messages(self, callback):
+        """Monitorea mensajes nuevos continuamente"""
+        last_message_count = 0
+        
+        while True:
+            try:
+                # Obtener mensajes no leídos
+                messages = self.get_unread_messages()
+                
+                if len(messages) > last_message_count:
+                    # Hay nuevos mensajes
+                    new_messages = messages[last_message_count:]
+                    for msg in new_messages:
+                        callback(msg)
+                
+                last_message_count = len(messages)
+                time.sleep(5)  # Check cada 5 segundos
+                
+            except Exception as e:
+                print(f"Error en monitor: {e}")
+                time.sleep(10)
+    
+    def disconnect(self):
+        """Cierra la conexión"""
+        if self.driver:
+            self.driver.quit()
+            self.is_connected = False
 class SignalClient:
     """Cliente para enviar y recibir mensajes de Signal"""
     
@@ -634,13 +805,14 @@ class AudioProcessor:
 # ==================== BOT PRINCIPAL ====================
 class WhatsAppSignalAssistant:
     def __init__(self):
-        self.wa = WhatsAppWeb()
+        self.wa = WhatsAppClient()
         self.signal = SignalClient()
         self.msg_manager = MessageManager()
         self.claude = ClaudeAssistant()
         self.email_manager = EmailManager()
         self.audio_processor = AudioProcessor()
         self.running = True
+        self.processed_message_ids = set()  # Para evitar procesar duplicados
         
         # Cargar configuración de filtros guardada
         self.load_config()
@@ -652,12 +824,12 @@ class WhatsAppSignalAssistant:
         print("=" * 50)
         
         # Conectar a WhatsApp
-        print("\n📱 Conectando a WhatsApp...")
-        self.wa.connect()
-        print("✓ WhatsApp conectado")
+        print("\n📱 Conectando a WhatsApp Web...")
+        if not self.wa.connect():
+            print("❌ No se pudo conectar a WhatsApp")
+            return
         
-        # Configurar manejador de mensajes de WhatsApp
-        self.wa.on_message(self.handle_whatsapp_message)
+        print("✓ WhatsApp conectado")
         
         # Programar resúmenes automáticos
         for time_str in Config.SUMMARY_TIMES:
@@ -683,6 +855,9 @@ class WhatsAppSignalAssistant:
                 # Procesar comandos de Signal
                 self.check_signal_commands()
                 
+                # Verificar mensajes de WhatsApp
+                self.check_whatsapp_messages()
+                
                 # Verificar emails con alertas de seguridad cada 2 minutos
                 if int(time.time()) % 120 == 0:
                     self.check_and_notify_email_security()
@@ -690,75 +865,76 @@ class WhatsAppSignalAssistant:
                 # Ejecutar tareas programadas
                 schedule.run_pending()
                 
-                time.sleep(2)  # Check cada 2 segundos
+                time.sleep(5)  # Check cada 5 segundos
         except KeyboardInterrupt:
             print("\n\n🛑 Deteniendo bot...")
             self.stop()
     
-    def handle_whatsapp_message(self, message):
+    def check_whatsapp_messages(self):
+        """Verifica nuevos mensajes de WhatsApp"""
+        try:
+            messages = self.wa.get_unread_messages()
+            
+            for message in messages:
+                msg_id = message.get('id')
+                
+                # Evitar procesar duplicados
+                if msg_id in self.processed_message_ids:
+                    continue
+                
+                self.processed_message_ids.add(msg_id)
+                self.handle_whatsapp_message(message)
+                
+        except Exception as e:
+            print(f"Error verificando mensajes de WhatsApp: {e}")
+    
+    def handle_whatsapp_message(self, message: Dict):
         """Maneja mensajes entrantes de WhatsApp"""
         # Ignorar mensajes propios
-        if message.sender == Config.YOUR_PHONE:
+        if message.get('sender') == Config.YOUR_PHONE:
             return
         
         # Aplicar filtros
         if not self.should_process_message(message):
             return
         
-        msg_data = {
-            'id': message.id,
-            'sender': message.sender,
-            'sender_name': message.sender_name or message.sender,
-            'text': message.text or '',
-            'type': message.type,
-            'is_group': message.is_group,
-            'is_muted': message.chat.is_muted if hasattr(message, 'chat') else False,
-            'source': 'WhatsApp'
-        }
+        message['source'] = 'WhatsApp'
         
-        print(f"📩 Nuevo mensaje WA de {msg_data['sender_name']}")
-        
-        # Procesar audio si es nota de voz
-        if message.type == 'audio':
-            audio_path = message.download_media()
-            transcription = self.audio_processor.transcribe_audio(audio_path)
-            
-            if transcription:
-                msg_data['text'] = f"[Audio transcrito]: {transcription}"
+        print(f"📩 Nuevo mensaje WA de {message['sender_name']}")
         
         # Añadir mensaje a la base de datos (esto detecta seguridad automáticamente)
-        self.msg_manager.add_message(msg_data)
+        self.msg_manager.add_message(message)
         
         # Verificar si es alerta de seguridad y notificar por Signal
-        if msg_data.get('is_security_alert'):
-            self.notify_security_alert(msg_data)
+        if message.get('is_security_alert'):
+            self.notify_security_alert(message)
         # Si no es de seguridad pero es urgente, notificar como urgente
-        elif msg_data.get('is_urgent'):
-            self.notify_urgent_message(msg_data)
+        elif message.get('is_urgent'):
+            self.notify_urgent_message(message)
         
         # Generar respuesta automática en WhatsApp
-        response = self.claude.process_message(msg_data['text'], msg_data['sender_name'])
-        self.wa.send_message(message.sender, response)
-        print(f"✓ Respuesta enviada a {msg_data['sender_name']}")
+        response = self.claude.process_message(message['text'], message['sender_name'])
+        self.wa.send_message(message['sender'], response)
+        print(f"✓ Respuesta enviada a {message['sender_name']}")
     
     def should_process_message(self, message) -> bool:
         """Determina si un mensaje debe ser procesado según los filtros"""
-        sender_name = message.sender_name or message.sender
+        sender_name = message.get('sender_name') or message.get('sender', '')
         
         # 1. Verificar si es grupo y están deshabilitados
-        if Config.IGNORE_GROUPS and message.is_group:
-            print(f"⊘ Ignorando mensaje de grupo: {message.chat_name}")
+        if Config.IGNORE_GROUPS and message.get('is_group'):
+            print(f"⊘ Ignorando mensaje de grupo: {message.get('chat_name', sender_name)}")
             return False
         
         # 2. Verificar si el contacto está silenciado
-        if Config.IGNORE_MUTED and hasattr(message, 'chat') and message.chat.is_muted:
+        if Config.IGNORE_MUTED and message.get('is_muted'):
             print(f"🔇 Ignorando contacto silenciado: {sender_name}")
             return False
         
         # 3. Verificar blacklist (lista negra)
         if Config.BLACKLIST:
             for blocked in Config.BLACKLIST:
-                if blocked in message.sender or blocked in sender_name:
+                if blocked in message.get('sender', '') or blocked in sender_name:
                     print(f"🚫 Contacto en blacklist: {sender_name}")
                     return False
         
@@ -766,7 +942,7 @@ class WhatsAppSignalAssistant:
         if Config.WHITELIST:
             is_whitelisted = False
             for allowed in Config.WHITELIST:
-                if allowed in message.sender or allowed in sender_name:
+                if allowed in message.get('sender', '') or allowed in sender_name:
                     is_whitelisted = True
                     break
             
@@ -1112,6 +1288,7 @@ Mensaje:
         """Detiene el bot"""
         self.running = False
         self.email_manager.disconnect()
+        self.wa.disconnect()
         self.signal.send_message("🛑 Bot detenido")
         print("✓ Bot detenido correctamente")
 
